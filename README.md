@@ -68,6 +68,7 @@ Tool berisiko (`write_file`, `shell`, `http_request`) memicu pesan Telegram deng
 - Permintaan persisten di tabel `approvals` (ID unik, sesi pemohon, hash argumen, kedaluwarsa 5 menit).
 - Callback divalidasi: hanya user pada sesi pemohon, status `pending`, belum kedaluwarsa.
 - Keputusan atomik (`UPDATE ... WHERE status='pending'`) — double-click / race: hanya satu yang menang.
+- **Binding tindakan (v0.2.1)**: persetujuan terikat pada identitas immutable — task ID + nama tool + argumen kanonik (canonical JSON deterministik: key diurutkan, whitespace dihapus, angka via `json.Number`) + SHA-256 domain-separated (`tools.BindHash`). Tepat sebelum eksekusi, identitas diverifikasi ulang dan approval dikonsumsi atomik (`approved` → `executed`) — perubahan argumen/tool/task setelah approval, replay callback, dan eksekusi ganda semuanya ditolak. Hash bersifat integritas, bukan autentikasi; otorisasi user & status approval tetap wajib.
 - Fail-closed: kedaluwarsa, restart (pending → `expired` saat startup), error → **tolak**; tidak ada eksekusi ulang otomatis.
 - Argumen ditampilkan setelah sanitasi secret (`tools.PreviewArgs`).
 
@@ -81,7 +82,7 @@ Tool berisiko (`write_file`, `shell`, `http_request`) memicu pesan Telegram deng
 ## /clear dan memory
 
 - `/clear` menghapus riwayat pesan **hanya sesi aktif** (transaksional, dengan konfirmasi tombol); memory jangka panjang tidak terhapus.
-- Retensi: `MEMORY_RETENTION_DAYS` dikonfigurasi di `.env` (pembersihan otomatis berkala menyusul; backup terlebih dulu via `deploy/scripts/backup.sh`).
+- Retensi (v0.2.1): `MEMORY_RETENTION_DAYS` > 0 → memory dengan `updated_at` lebih tua dihapus oleh worker berkala (`RETENTION_INTERVAL`, default 6 jam; batch 500, transaksional). `<=0` atau tidak disetel → **nonaktif** (tidak menghapus apa pun). Hanya tabel `memory` — tugas, approval, jadwal, dan pesan tidak disentuh. Log hanya mencatat jumlah record, bukan konten. Backup sebelum retensi pertama: `deploy/scripts/backup.sh`; restore: stop service → salin file backup ke `data/hermes.db` → start.
 
 ## Recovery
 
@@ -91,10 +92,9 @@ Tugas berstatus `running`/`waiting_approval` saat restart **tidak diulang otomat
 
 1. **E2E Telegram dengan bot sungguhan belum dijalankan** — butuh token asli; semua logika lokal teruji via unit/integration test (mock provider + SQLite).
 2. Memory search = LIKE SQL, **bukan semantic search**.
-3. Retensi memory (`MEMORY_RETENTION_DAYS`) berupa config, belum dieksekusi otomatis oleh pekerja berkala.
-4. Zona waktu jadwal disimpan per-jadwal (default `Asia/Jakarta`) tapi perhitungan interval memakai UTC; cron ekspresi (mis. "tiap Senin 09:00") belum didukung — hanya `once` RFC3339 dan `interval`.
-5. Pengukuran RAM/CPU pada target 4 GB **belum dilakukan** (dibangun & diuji di VM x86_64 2 vCPU; RSS idle terukur ~18 MB di VM pengembangan — bukan angka VM42).
-6. Approval binding: `args_hash` disimpan tapi belum diverifikasi ulang saat eksekusi (eksekusi tetap memakai argumen asli dari loop, sehingga risiko low; verifikasi eksplisit menyusul).
+3. Zona waktu jadwal disimpan per-jadwal (default `Asia/Jakarta`) tapi perhitungan interval memakai UTC; cron ekspresi belum didukung — hanya `once` RFC3339 dan `interval`.
+4. Pengukuran RAM/CPU pada target 4 GB **belum dilakukan** (RSS idle terukur ~18 MB di VM pengembangan — bukan angka VM42).
+5. Scheduler `tick` menjalankan job sinkron (job lambat menunda tick berikut, tapi bebas goroutine leak dan aman SQLite).
 
 ## Verifikasi
 

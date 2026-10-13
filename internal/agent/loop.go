@@ -156,6 +156,7 @@ func (r *Runner) Run(ctx context.Context, taskID int64, sessionID, userMsg strin
 			}
 			args := json.RawMessage(tc.Function.Arguments)
 			approved := false
+			var apprID string
 			if t, ok := r.Registry.Get(tc.Function.Name); ok && t.Permission() == tools.PermApproval {
 				switch {
 				case r.Bridge != nil:
@@ -163,7 +164,21 @@ func (r *Runner) Run(ctx context.Context, taskID int64, sessionID, userMsg strin
 					if ttl <= 0 {
 						ttl = 5 * time.Minute
 					}
-					approved, _ = r.Bridge.WaitForApproval(rctx, taskID, tc.Function.Name, args, ttl)
+					approved, _, apprID = r.Bridge.WaitForApproval(rctx, taskID, tc.Function.Name, args, ttl)
+					// Binding: tepat sebelum eksekusi, validasi ulang identitas
+					// tindakan & ambil approval secara atomik (anti double-exec).
+					if approved {
+						canon, err := tools.CanonicalJSON(args)
+						if err != nil {
+							approved = false
+						} else {
+							consumed, err := r.Store.ConsumeApprovedApproval(apprID, taskID, tc.Function.Name, tools.BindHash(taskID, tc.Function.Name, canon), time.Now().UTC().Format(time.RFC3339))
+							if err != nil || !consumed {
+								r.Log.Warn("approval binding gagal — eksekusi ditolak", "approval", apprID, "err", err)
+								approved = false
+							}
+						}
+					}
 				case r.Approve != nil:
 					approved = r.Approve(taskID, tc.Function.Name, args)
 				}

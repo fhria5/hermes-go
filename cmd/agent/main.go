@@ -154,10 +154,18 @@ func main() {
 		}
 		ap := &storage.Approval{
 			ID: req.ID, TaskID: req.TaskID, SessionID: fmt.Sprintf("tg:%d", chatID),
-			Tool: req.Tool, ArgsHash: HashArgs(req.Args), ArgsPreview: tools.PreviewArgs(req.Args, 300),
+			Tool: req.Tool, ArgsPreview: tools.PreviewArgs(req.Args, 300),
 			RequestedAt: time.Now().UTC().Format(time.RFC3339),
 			ExpiresAt:   time.Now().UTC().Add(5 * time.Minute).Format(time.RFC3339),
 		}
+		// Binding immutable: kanonikalisasi + hash identitas tindakan.
+		canon, err := tools.CanonicalJSON(req.Args)
+		if err != nil {
+			log.Error("approval: argumen tidak kanonik — tolak", "err", err)
+			return
+		}
+		ap.CanonicalArgs = string(canon)
+		ap.ArgsHash = tools.BindHash(req.TaskID, req.Tool, canon)
 		if err := store.CreateApproval(ap); err != nil {
 			log.Error("simpan approval gagal", "err", err)
 			return
@@ -238,6 +246,9 @@ func main() {
 		}()
 	})
 	go sched.Run(ctx)
+
+	// ---- Retensi memory (MEMORY_RETENTION_DAYS; <=0 = nonaktif) ----
+	go RunRetentionWorker(ctx, store, cfg.Storage.RetentionDays, log)
 
 	bot.Handler = func(ctx context.Context, userID, chatID int64, text string) {
 		sessionID := fmt.Sprintf("tg:%d", userID)

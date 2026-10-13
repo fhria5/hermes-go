@@ -238,33 +238,32 @@ func JSONString(v interface{}) string {
 // ---------- Approvals ----------
 
 type Approval struct {
-	ID          string
-	TaskID      int64
-	SessionID   string
-	Tool        string
-	ArgsHash    string
-	ArgsPreview string
-	Status      string
-	RequestedAt string
-	ExpiresAt   string
-	DecidedBy   int64
+	ID            string
+	TaskID        int64
+	SessionID     string
+	Tool          string
+	ArgsHash      string
+	ArgsPreview   string
+	CanonicalArgs string
+	Status        string
+	RequestedAt   string
+	ExpiresAt     string
+	DecidedBy     int64
 }
 
 func (s *Store) CreateApproval(a *Approval) error {
-	_, err := s.DB.Exec(`INSERT INTO approvals(id, task_id, session_id, tool, args_hash, args_preview, status, requested_at, expires_at)
-		VALUES(?,?,?,?,?,?,?,?,?)`, a.ID, a.TaskID, a.SessionID, a.Tool, a.ArgsHash, a.ArgsPreview, "pending", a.RequestedAt, a.ExpiresAt)
+	_, err := s.DB.Exec(`INSERT INTO approvals(id, task_id, session_id, tool, args_hash, args_preview, canonical_args, status, requested_at, expires_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?)`, a.ID, a.TaskID, a.SessionID, a.Tool, a.ArgsHash, a.ArgsPreview, a.CanonicalArgs, "pending", a.RequestedAt, a.ExpiresAt)
 	return err
 }
 
 // DecideApproval mengubah status pending → approved/rejected secara atomik
 // (UPDATE ... WHERE status='pending' — hanya satu caller yang menang).
-// Kembalikan (applied, err): applied=false berarti sudah diproses/diubah orang lain.
 func (s *Store) DecideApproval(id string, approve bool, by int64, now string) (bool, error) {
 	st := "rejected"
 	if approve {
 		st = "approved"
 	}
-	// Kedaluwarsa dicek di sini juga: kedaluwarsa → tidak bisa disetujui.
 	r, err := s.DB.Exec(`UPDATE approvals SET status=?, decided_at=?, decided_by=?
 		WHERE id=? AND status='pending' AND expires_at > ?`, st, now, by, id, now)
 	if err != nil {
@@ -272,6 +271,33 @@ func (s *Store) DecideApproval(id string, approve bool, by int64, now string) (b
 	}
 	n, _ := r.RowsAffected()
 	return n == 1, nil
+}
+
+// ConsumeApprovedApproval: validasi identitas tindakan & ambil approval untuk
+// eksekusi SECARA ATOMIK — status 'approved' → 'executed' dalam satu UPDATE.
+// Mencegah double execution: hanya satu caller yang berhasil mengubah status.
+// Binding diverifikasi ulang di sini: task_id / tool / args_hash ≠ tersimpan → ditolak.
+func (s *Store) ConsumeApprovedApproval(id string, taskID int64, tool string, bindHash, now string) (bool, error) {
+	r, err := s.DB.Exec(`UPDATE approvals SET status='executed', executed_at=?
+		WHERE id=? AND status='approved' AND task_id=? AND tool=? AND args_hash=?`,
+		now, id, taskID, tool, bindHash)
+	if err != nil {
+		return false, err
+	}
+	n, _ := r.RowsAffected()
+	return n == 1, nil
+}
+
+// GetApprovalForExec: baca approval untuk verifikasi eksekusi (semua status).
+func (s *Store) GetApprovalForExec(id, now string) (*Approval, error) {
+	a := &Approval{}
+	err := s.DB.QueryRow(`SELECT id, task_id, session_id, tool, args_hash, args_preview, COALESCE(canonical_args,''), status, COALESCE(decided_by,0), expires_at
+		FROM approvals WHERE id=?`, id).
+		Scan(&a.ID, &a.TaskID, &a.SessionID, &a.Tool, &a.ArgsHash, &a.ArgsPreview, &a.CanonicalArgs, &a.Status, &a.DecidedBy, &a.ExpiresAt)
+	if err != nil {
+		return nil, err
+	}
+	return a, nil
 }
 
 // GetApproval mengembalikan approval hanya jika masih pending dan belum kedaluwarsa.
@@ -436,4 +462,50 @@ func (s *Store) ClearSession(sessionID string) error {
 		return err
 	}
 	return tx.Commit()
+}
+
+// RetentionResult: ringkasan satu siklus pembersihan (untuk log).
+type RetentionResult struct {
+	MemoryDeleted int64
+	Cutoff        string
+}
+
+// ApplyMemoryRetention menghapus memory yang lebih tua dari cutoff (RFC3339),
+// dengan batch terbatas, dalam transaksi. Hanya tabel `memory` — tugas aktif,
+// approval pending, riwayat tool call, dan pesan sesi TIDAK disentuh
+// (policy: retention hanya untuk memory jangka panjang yang bisa dibuat ulang).
+// cutoff kosong / nilainya tidak valid → tidak menghapus apa pun (fail-safe).
+func (s *Store) ApplyMemoryRetention(cutoff string, batch int) (RetentionResult, error) {
+	res := RetentionResult{}
+	if cutoff == "" || batch <= 0 {
+		return res, nil // perilaku: tidak disetel = tidak menghapus
+	}
+	// Validasi format cutoff.
+	if _, err := time.Parse(time.RFC3339, cutoff); err != nil {
+		return res, fmt.Errorf("cutoff tidak valid: %w", err)
+	}
+	tx, err := s.DB.Begin()
+	if err != nil {
+		return res, err
+	}
+	r, err := tx.Exec(`DELETE FROM memory WHERE key IN (
+		SELECT key FROM memory WHERE updated_at < ? LIMIT ?)`, cutoff, batch)
+	if err != nil {
+		tx.Rollback()
+		return res, err
+	}
+	n, _ := r.RowsAffected()
+	if err := tx.Commit(); err != nil {
+		return res, err
+	}
+	res.MemoryDeleted = n
+	res.Cutoff = cutoff
+	return res, nil
+}
+
+// OldestMemoryTime: timestamp memory tertua (untuk test).
+func (s *Store) CountMemory() (int, error) {
+	var n int
+	err := s.DB.QueryRow(`SELECT COUNT(*) FROM memory`).Scan(&n)
+	return n, err
 }

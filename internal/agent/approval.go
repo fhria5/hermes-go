@@ -73,7 +73,8 @@ func (b *ApprovalBridge) Resolve(id string, approved bool, by int64) bool {
 }
 
 // WaitForApproval dipanggil agent loop (blocking dengan TTL; fail-closed).
-func (b *ApprovalBridge) WaitForApproval(ctx context.Context, taskID int64, tool string, args json.RawMessage, ttl time.Duration) (bool, int64) {
+// Mengembalikan (approved, decidedBy, approvalID).
+func (b *ApprovalBridge) WaitForApproval(ctx context.Context, taskID int64, tool string, args json.RawMessage, ttl time.Duration) (bool, int64, string) {
 	id := newID()
 	req := &ApprovalRequest{
 		ID: id, TaskID: taskID, Tool: tool, Args: args,
@@ -82,19 +83,19 @@ func (b *ApprovalBridge) WaitForApproval(ctx context.Context, taskID int64, tool
 	select {
 	case b.Requests <- req:
 	case <-ctx.Done():
-		return false, 0
+		return false, 0, id
 	}
 	deadline := time.NewTimer(ttl)
 	defer deadline.Stop()
 	select {
 	case d := <-req.Done:
-		return d.Approved, d.By
+		return d.Approved, d.By, id
 	case <-deadline.C:
 		b.Resolve(id, false, 0) // bersihkan pending
-		return false, 0
+		return false, 0, id
 	case <-ctx.Done():
 		b.Resolve(id, false, 0)
-		return false, 0
+		return false, 0, id
 	}
 }
 
