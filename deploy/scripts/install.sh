@@ -13,7 +13,7 @@ id -u hermes &>/dev/null || useradd --system --home "$INSTALL_DIR" --shell /usr/
 
 mkdir -p "$INSTALL_DIR"/{data,workspace,skills}
 install -m 0755 "$BIN_SRC" "$INSTALL_DIR/hermes-go"
-cp -r "$(dirname "$0")/.."/skills/* "$INSTALL_DIR/skills/" 2>/dev/null || true
+cp -rn "$(dirname "$0")/.."/skills/* "$INSTALL_DIR/skills/" 2>/dev/null || true  # -n: jangan timpa skill yang sudah ada/dimodifikasi
 
 # .env: buat jika belum ada, jangan pernah ditimpa
 if [[ ! -f "$INSTALL_DIR/.env" ]]; then

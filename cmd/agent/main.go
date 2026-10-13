@@ -134,7 +134,7 @@ func main() {
 			}
 			fmt.Fprint(w, "ok")
 		})
-		_ = http.ListenAndServe("127.0.0.1:"+port(cfg.HealthAddr), mux)
+		_ = http.ListenAndServe(healthHost(cfg.HealthAddr), mux)
 	}()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -328,11 +328,12 @@ func main() {
 	log.Info("shutdown tertib")
 }
 
-func port(addr string) string {
-	if _, p, err := net.SplitHostPort(addr); err == nil {
-		return p
+// healthHost: host dari HEALTH_ADDR (default loopback 127.0.0.1 — tidak terekspos jaringan).
+func healthHost(addr string) string {
+	if h, p, err := net.SplitHostPort(addr); err == nil && h != "" && p != "" {
+		return net.JoinHostPort(h, p)
 	}
-	return "8089"
+	return "127.0.0.1:8089"
 }
 
 // handleSched: perintah /sched Telegram.
