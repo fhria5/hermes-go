@@ -3,13 +3,17 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -17,11 +21,39 @@ import (
 	"hermes-go/internal/config"
 	"hermes-go/internal/llm"
 	"hermes-go/internal/observability"
+	"hermes-go/internal/scheduler"
 	"hermes-go/internal/skills"
 	"hermes-go/internal/storage"
 	"hermes-go/internal/telegram"
 	"hermes-go/internal/tools"
 )
+
+// approvalChats: task_id → chat_id pemohon (untuk mengirim tombol approval
+// dan memvalidasi sesi pemutus). Mutex-protected; hanya di memori —
+// setelah restart approval pending sudah expired di DB (fail-closed).
+type approvalChats struct {
+	mu sync.Mutex
+	m  map[int64]int64
+}
+
+func newApprovalChats() *approvalChats { return &approvalChats{m: map[int64]int64{}} }
+func (a *approvalChats) set(taskID, chatID int64) {
+	a.mu.Lock()
+	a.m[taskID] = chatID
+	a.mu.Unlock()
+}
+func (a *approvalChats) get(taskID int64) int64 {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.m[taskID]
+}
+
+func sessionChatID(sessionID string) int64 {
+	// format "tg:<id>"
+	var id int64
+	fmt.Sscanf(sessionID, "tg:%d", &id)
+	return id
+}
 
 func main() {
 	log := observability.NewLogger()
@@ -46,6 +78,10 @@ func main() {
 			_ = store.SetTaskStatus(t.ID, "failed")
 			log.Warn("tugas tertinggal saat restart ditandai failed", "task_id", t.ID)
 		}
+	}
+	// Approval pending dari proses mati → expired (fail-closed; tidak dieksekusi ulang).
+	if err := store.ExpireApprovals(time.Now().UTC().Format(time.RFC3339)); err != nil {
+		log.Warn("expire approvals gagal", "err", err)
 	}
 
 	reg := tools.NewRegistry()
@@ -74,6 +110,7 @@ func main() {
 	}
 	log.Info("skill dimuat", "count", len(skillList))
 
+	bridge := agent.NewApprovalBridge(16)
 	runner := &agent.Runner{
 		Provider: provider, Registry: reg, Store: store, TaskTable: taskTable,
 		Limits: agent.Limits{
@@ -81,8 +118,9 @@ func main() {
 			MaxTokens: cfg.Agent.MaxTokensPerTask, ToolTimeout: cfg.Agent.ToolTimeout,
 			MaxOutput: int(cfg.Agent.MaxOutputBytes),
 		},
-		Approve: nil, // mode aman default: tool berisiko ditolak sampai approval diimplementasi via chat
-		Skills:  skillList, Log: log,
+		Bridge:      bridge,
+		ApprovalTTL: 5 * time.Minute,
+		Skills:      skillList, Log: log,
 	}
 
 	// Health check lokal saja (loopback), nonaktifkan akses publik.
@@ -106,6 +144,101 @@ func main() {
 	var allowed []int64
 	_ = json.Unmarshal([]byte(os.Getenv("TELEGRAM_ALLOWED_USERS")), &allowed)
 	bot := telegram.NewBot(api, allowed, 10, log)
+	chats := newApprovalChats()
+
+	// ---- Approval pump: request dari agent loop → pesan tombol Telegram ----
+	go bridge.Consume(ctx, func(req *agent.ApprovalRequest) {
+		chatID := chats.get(req.TaskID)
+		if chatID == 0 {
+			return // tidak tahu tujuan → TTL menolak (fail-closed)
+		}
+		ap := &storage.Approval{
+			ID: req.ID, TaskID: req.TaskID, SessionID: fmt.Sprintf("tg:%d", chatID),
+			Tool: req.Tool, ArgsHash: HashArgs(req.Args), ArgsPreview: tools.PreviewArgs(req.Args, 300),
+			RequestedAt: time.Now().UTC().Format(time.RFC3339),
+			ExpiresAt:   time.Now().UTC().Add(5 * time.Minute).Format(time.RFC3339),
+		}
+		if err := store.CreateApproval(ap); err != nil {
+			log.Error("simpan approval gagal", "err", err)
+			return
+		}
+		text := fmt.Sprintf("⚠️ Persetujuan diperlukan (tugas #%d)\nTool: %s\nArgumen:\n%s\n\nKedaluwarsa 5 menit.", req.TaskID, req.Tool, ap.ArgsPreview)
+		btns := []telegram.InlineButton{
+			{Text: "✅ Setujui", CallbackData: "apr:ok:" + req.ID},
+			{Text: "❌ Tolak", CallbackData: "apr:no:" + req.ID},
+		}
+		if _, err := api.SendMessageWithButtons(ctx, chatID, text, btns); err != nil {
+			log.Error("kirim approval gagal", "err", err)
+		}
+	})
+
+	// ---- Callback handler: validasi identitas, status, kedaluwarsa, atomik ----
+	bot.CallbackFn = func(ctx context.Context, userID int64, data, cbID string) {
+		switch {
+		case strings.HasPrefix(data, "apr:"):
+			parts := strings.SplitN(data, ":", 3)
+			if len(parts) != 3 || (parts[1] != "ok" && parts[1] != "no") {
+				api.AnswerCallbackQuery(ctx, cbID, "Callback tidak valid.")
+				return
+			}
+			apprID := parts[2]
+			now := time.Now().UTC().Format(time.RFC3339)
+			ap, err := store.GetApproval(apprID, now) // menolak bukan-pending & kedaluwarsa
+			if err != nil {
+				api.AnswerCallbackQuery(ctx, cbID, "Tidak dapat diproses (kedaluwarsa/sudah diproses).")
+				return
+			}
+			if ap.SessionID != fmt.Sprintf("tg:%d", userID) {
+				log.Warn("approval ditolak: user bukan pemohon sesi", "user", userID)
+				api.AnswerCallbackQuery(ctx, cbID, "Bukan sesi Anda.")
+				return
+			}
+			approve := parts[1] == "ok"
+			// Atomik: hanya satu callback yang menang (UPDATE WHERE status='pending' AND expires_at>now).
+			applied, err := store.DecideApproval(apprID, approve, userID, now)
+			if err != nil || !applied {
+				api.AnswerCallbackQuery(ctx, cbID, "Sudah diproses.")
+				return
+			}
+			if approve {
+				api.AnswerCallbackQuery(ctx, cbID, "Disetujui.")
+			} else {
+				api.AnswerCallbackQuery(ctx, cbID, "Ditolak.")
+			}
+			bridge.Resolve(apprID, approve, userID)
+		case strings.HasPrefix(data, "clr:"):
+			if data == "clr:ok" {
+				if err := store.ClearSession(fmt.Sprintf("tg:%d", userID)); err != nil {
+					api.AnswerCallbackQuery(ctx, cbID, "Gagal menghapus.")
+					return
+				}
+				api.AnswerCallbackQuery(ctx, cbID, "Sesi dihapus.")
+			} else {
+				api.AnswerCallbackQuery(ctx, cbID, "Batal.")
+			}
+		default:
+			api.AnswerCallbackQuery(ctx, cbID, "Tidak dikenal.")
+		}
+	}
+
+	// ---- Scheduler ----
+	sched := scheduler.New(store, func(prompt, sessionID string) {
+		chatID := sessionChatID(sessionID)
+		taskID, err := store.CreateTask(sessionID, prompt)
+		if err != nil {
+			log.Error("scheduler: buat task gagal", "err", err)
+			return
+		}
+		chats.set(taskID, chatID)
+		_ = api.SendMessage(ctx, chatID, fmt.Sprintf("⏰ Tugas terjadwal #%d dimulai.", taskID))
+		go func() {
+			result, status := runner.Run(ctx, taskID, sessionID, prompt)
+			log.Info("tugas terjadwal selesai", "task_id", taskID, "status", status)
+			_ = api.SendMessage(ctx, chatID, fmt.Sprintf("Tugas terjadwal #%d [%s]\n%s", taskID, status, result))
+		}()
+	})
+	go sched.Run(ctx)
+
 	bot.Handler = func(ctx context.Context, userID, chatID int64, text string) {
 		sessionID := fmt.Sprintf("tg:%d", userID)
 		switch {
@@ -147,8 +280,17 @@ func main() {
 				return
 			}
 			_ = api.SendMessage(ctx, chatID, fmt.Sprintf("#%d [%s]", tasks[0].ID, tasks[0].Status))
+		case strings.HasPrefix(text, "/sched"):
+			handleSched(ctx, api, store, sessionID, chatID, text)
 		case text == "/clear":
-			_ = api.SendMessage(ctx, chatID, "/clear belum diimplementasi.")
+			if _, err := api.SendMessageWithButtons(ctx, chatID,
+				"Hapus seluruh riwayat pesan sesi ini? Memory jangka panjang TIDAK terhapus.",
+				[]telegram.InlineButton{
+					{Text: "✅ Ya, hapus sesi", CallbackData: "clr:ok"},
+					{Text: "❌ Batal", CallbackData: "clr:no"},
+				}); err != nil {
+				log.Error("kirim konfirmasi clear gagal", "err", err)
+			}
 		default:
 			if strings.HasPrefix(text, "/") {
 				_ = api.SendMessage(ctx, chatID, "Perintah tidak dikenal. /help")
@@ -159,6 +301,7 @@ func main() {
 				_ = api.SendMessage(ctx, chatID, "Gagal membuat tugas.")
 				return
 			}
+			chats.set(taskID, chatID)
 			_ = api.SendMessage(ctx, chatID, fmt.Sprintf("Tugas #%d diterima, sedang dikerjakan.", taskID))
 			start := time.Now()
 			result, status := runner.Run(ctx, taskID, sessionID, text)
@@ -179,6 +322,100 @@ func port(addr string) string {
 		return p
 	}
 	return "8089"
+}
+
+// handleSched: perintah /sched Telegram.
+func handleSched(ctx context.Context, api *telegram.API, store *storage.Store, sessionID string, chatID int64, text string) {
+	fields := strings.Fields(text)
+	if len(fields) < 2 {
+		_ = api.SendMessage(ctx, chatID, "Format: /sched list|add|on|off|del")
+		return
+	}
+	switch fields[1] {
+	case "list":
+		list, _ := store.ListSchedules(sessionID)
+		out := "Jadwal:\n"
+		for _, s := range list {
+			en := "off"
+			if s.Enabled {
+				en = "on"
+			}
+			out += fmt.Sprintf("#%d [%s] %s %s next=%s\n", s.ID, en, s.Name, s.Kind, s.NextRunAt)
+		}
+		_ = api.SendMessage(ctx, chatID, out)
+	case "add":
+		// /sched add <nama> interval <detik> <prompt...> | once <RFC3339> <prompt...>
+		if len(fields) < 5 {
+			_ = api.SendMessage(ctx, chatID, "Format: /sched add <nama> interval <detik> <prompt> | once <RFC3339> <prompt>")
+			return
+		}
+		sc := &storage.Schedule{SessionID: sessionID, Name: fields[2], Kind: fields[3], TZ: "Asia/Jakarta", Enabled: true}
+		switch sc.Kind {
+		case "interval":
+			sec, err := strconv.Atoi(fields[4])
+			if err != nil || sec < 60 || sec > 30*24*3600 {
+				_ = api.SendMessage(ctx, chatID, "Interval harus 60..2592000 detik.")
+				return
+			}
+			sc.IntervalSec = sec
+			sc.Prompt = strings.Join(fields[5:], " ")
+			sc.NextRunAt = time.Now().UTC().Add(time.Duration(sec) * time.Second).Format(time.RFC3339)
+		case "once":
+			t, err := time.Parse(time.RFC3339, fields[4])
+			if err != nil || t.Before(time.Now()) {
+				_ = api.SendMessage(ctx, chatID, "Waktu harus RFC3339 di masa depan.")
+				return
+			}
+			sc.RunAt = t.UTC().Format(time.RFC3339)
+			sc.Prompt = strings.Join(fields[5:], " ")
+			sc.NextRunAt = sc.RunAt
+		default:
+			_ = api.SendMessage(ctx, chatID, "kind: interval|once")
+			return
+		}
+		if sc.Prompt == "" {
+			_ = api.SendMessage(ctx, chatID, "Prompt wajib.")
+			return
+		}
+		id, err := store.CreateSchedule(sc)
+		if err != nil {
+			_ = api.SendMessage(ctx, chatID, "Gagal: "+err.Error())
+			return
+		}
+		_ = api.SendMessage(ctx, chatID, fmt.Sprintf("Jadwal #%d dibuat.", id))
+	case "on", "off":
+		if len(fields) < 3 {
+			_ = api.SendMessage(ctx, chatID, "Format: /sched on|off <id>")
+			return
+		}
+		var id int64
+		if _, err := fmt.Sscanf(fields[2], "%d", &id); err != nil {
+			_ = api.SendMessage(ctx, chatID, "Format: /sched on|off <id>")
+			return
+		}
+		ok, err := store.SetScheduleEnabled(id, sessionID, fields[1] == "on")
+		if err != nil || !ok {
+			_ = api.SendMessage(ctx, chatID, "Jadwal tidak ditemukan.")
+			return
+		}
+		_ = api.SendMessage(ctx, chatID, "OK.")
+	case "del":
+		if len(fields) < 3 {
+			_ = api.SendMessage(ctx, chatID, "Format: /sched del <id>")
+			return
+		}
+		var id int64
+		if _, err := fmt.Sscanf(fields[2], "%d", &id); err != nil {
+			_ = api.SendMessage(ctx, chatID, "Format: /sched del <id>")
+			return
+		}
+		ok, _ := store.DeleteSchedule(id, sessionID)
+		if ok {
+			_ = api.SendMessage(ctx, chatID, "Dihapus.")
+		} else {
+			_ = api.SendMessage(ctx, chatID, "Tidak ditemukan.")
+		}
+	}
 }
 
 func truncateS(s string, n int) string {
@@ -211,3 +448,9 @@ func (a *storeAdapter) GetTask(id int64) (*tools.TaskRow, error) {
 	return &tools.TaskRow{ID: t.ID, Status: t.Status, Description: t.Description}, nil
 }
 func (a *storeAdapter) SetTaskStatus(id int64, s string) error { return a.store.SetTaskStatus(id, s) }
+
+// HashArgs: hash argumen untuk pengikatan approval ke argumen persis.
+func HashArgs(args json.RawMessage) string {
+	h := sha256.Sum256(args)
+	return hex.EncodeToString(h[:])
+}

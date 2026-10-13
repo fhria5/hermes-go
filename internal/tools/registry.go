@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"hermes-go/internal/llm"
+	"hermes-go/internal/observability"
 )
 
 // Permission menyatakan level izin eksekusi sebuah tool.
@@ -68,6 +69,15 @@ func (r *Registry) AllowedTools() []llm.ToolDef {
 		defs = append(defs, def)
 	}
 	return defs
+}
+
+// PreviewArgs: ringkasan argumen yang disanitasi untuk ditampilkan ke user.
+func PreviewArgs(args json.RawMessage, max int) string {
+	s := observability.Sanitize(string(args))
+	if len(s) > max {
+		s = s[:max] + "...[truncated]"
+	}
+	return s
 }
 
 // Validate: args harus JSON object dan sesuai "required" di schema (validasi minimal tapi nyata).

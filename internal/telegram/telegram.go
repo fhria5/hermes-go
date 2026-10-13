@@ -27,8 +27,9 @@ func NewAPI(token string, log *slog.Logger) *API {
 }
 
 type Update struct {
-	UpdateID int64 `json:"update_id"`
-	Message  *Msg  `json:"message"`
+	UpdateID      int64          `json:"update_id"`
+	Message       *Msg           `json:"message"`
+	CallbackQuery *CallbackQuery `json:"callback_query"`
 }
 
 type Msg struct {
@@ -57,6 +58,22 @@ type apiResponseMsg struct {
 	OK          bool   `json:"ok"`
 	Description string `json:"description"`
 }
+
+// Inline keyboard
+type InlineButton struct {
+	Text         string `json:"text"`
+	CallbackData string `json:"callback_data"`
+}
+
+type CallbackQuery struct {
+	ID   string `json:"id"`
+	From *User  `json:"from"`
+	Data string `json:"data"`
+}
+
+// Update diperluas dengan callback_query.
+// (struct Update di atas tetap; tambahkan field CallbackQuery di sini via duplikasi
+//  tidak perlu — sunting struct Update langsung di file ini pada baris struct utama.)
 
 func (a *API) call(ctx context.Context, method string, params url.Values) ([]Update, error) {
 	u := fmt.Sprintf("https://api.telegram.org/bot%s/%s", a.token, method)
@@ -88,6 +105,34 @@ func (a *API) call(ctx context.Context, method string, params url.Values) ([]Upd
 	return nil, nil
 }
 
+// Update diperluas dengan callback_query (lihat struct Update).
+
+// SendMessageWithButtons: kirim pesan dengan inline keyboard.
+func (a *API) SendMessageWithButtons(ctx context.Context, chatID int64, text string, buttons []InlineButton) (int64, error) {
+	kb, _ := json.Marshal([][]InlineButton{buttons})
+	_, err := a.call(ctx, "sendMessage", url.Values{
+		"chat_id":      {strconv.FormatInt(chatID, 10)},
+		"text":         {truncateMsg(text)},
+		"reply_markup": {string(kb)},
+	})
+	return 0, err
+}
+
+// AnswerCallbackQuery: wajib dijawab agar spinner di client berhenti.
+func (a *API) AnswerCallbackQuery(ctx context.Context, cbID, text string) {
+	_, _ = a.call(ctx, "answerCallbackQuery", url.Values{
+		"callback_query_id": {cbID},
+		"text":              {truncateMsg(text)},
+	})
+}
+
+func truncateMsg(s string) string {
+	if len(s) > 4000 {
+		return s[:4000]
+	}
+	return s
+}
+
 func (a *API) SendMessage(ctx context.Context, chatID int64, text string) error {
 	// Telegram batas 4096 char; pecah.
 	for len(text) > 4096 {
@@ -111,7 +156,7 @@ func (a *API) GetUpdates(ctx context.Context, timeoutSec int) ([]Update, error) 
 	res, err := a.call(ctx, "getUpdates", url.Values{
 		"offset":          {strconv.FormatInt(a.offset, 10)},
 		"timeout":         {strconv.Itoa(timeoutSec)},
-		"allowed_updates": {`["message"]`},
+		"allowed_updates": {`["message","callback_query"]`},
 	})
 	if err != nil {
 		return nil, err
@@ -129,11 +174,13 @@ type Bot struct {
 	API          *API
 	AllowedUsers map[int64]bool
 	Handler      func(ctx context.Context, userID, chatID int64, text string)
+	CallbackFn   func(ctx context.Context, userID int64, data, cbID string)
 	log          *slog.Logger
 
 	seen     map[int64]bool
 	seenMu   sync.Mutex
 	queue    chan Update
+	cbQueue  chan *CallbackQuery
 	userMute map[int64]time.Time // rate limit sederhana per user
 	muteMu   sync.Mutex
 }
@@ -147,6 +194,7 @@ func NewBot(api *API, allowed []int64, queueSize int, log *slog.Logger) *Bot {
 		API: api, AllowedUsers: am, log: log,
 		seen:     map[int64]bool{},
 		queue:    make(chan Update, queueSize),
+		cbQueue:  make(chan *CallbackQuery, queueSize),
 		userMute: map[int64]time.Time{},
 	}
 }
@@ -155,6 +203,7 @@ func NewBot(api *API, allowed []int64, queueSize int, log *slog.Logger) *Bot {
 // agar RAM & SQLite aman; duplikat update_id dibuang).
 func (b *Bot) Run(ctx context.Context) error {
 	go b.worker(ctx)
+	go b.cbWorker(ctx)
 	for {
 		select {
 		case <-ctx.Done():
@@ -178,6 +227,20 @@ func (b *Bot) Run(ctx context.Context) error {
 			if b.markSeen(u.UpdateID) {
 				continue // duplikat — Telegram bisa mengirim ulang update_id sama
 			}
+			if u.CallbackQuery != nil {
+				// Callback: validasi allowlist pemutus.
+				if u.CallbackQuery.From == nil || !b.AllowedUsers[u.CallbackQuery.From.ID] {
+					b.log.Warn("callback dari user tidak diizinkan", "user_id", cbUserID(u))
+					b.API.AnswerCallbackQuery(ctx, u.CallbackQuery.ID, "Akses ditolak.")
+					continue
+				}
+				select {
+				case b.cbQueue <- u.CallbackQuery:
+				case <-ctx.Done():
+					return nil
+				}
+				continue
+			}
 			if u.Message == nil || u.Message.From == nil {
 				continue
 			}
@@ -197,6 +260,35 @@ func (b *Bot) Run(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+func (b *Bot) cbWorker(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case cb := <-b.cbQueue:
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						b.log.Error("panic callback", "err", r)
+					}
+				}()
+				if b.CallbackFn != nil {
+					b.CallbackFn(ctx, cb.From.ID, cb.Data, cb.ID)
+				} else {
+					b.API.AnswerCallbackQuery(ctx, cb.ID, "Handler tidak tersedia.")
+				}
+			}()
+		}
+	}
+}
+
+func cbUserID(u Update) int64 {
+	if u.CallbackQuery != nil && u.CallbackQuery.From != nil {
+		return u.CallbackQuery.From.ID
+	}
+	return 0
 }
 
 func (b *Bot) worker(ctx context.Context) {

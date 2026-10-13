@@ -59,7 +59,29 @@ sudo bash deploy/scripts/backup.sh  # backup SQLite WAL-safe
 curl 127.0.0.1:8089/health          # health check lokal
 ```
 
-Perintah Telegram: `/start /help /status /tasks /cancel <id> /memory <query>`; pesan biasa memulai tugas.
+Perintah Telegram: `/start /help /status /tasks /cancel <id> /memory <query> /clear /sched ...`; pesan biasa memulai tugas.
+
+## Approval interaktif
+
+Tool berisiko (`write_file`, `shell`, `http_request`) memicu pesan Telegram dengan tombol **✅ Setujui / ❌ Tolak**:
+
+- Permintaan persisten di tabel `approvals` (ID unik, sesi pemohon, hash argumen, kedaluwarsa 5 menit).
+- Callback divalidasi: hanya user pada sesi pemohon, status `pending`, belum kedaluwarsa.
+- Keputusan atomik (`UPDATE ... WHERE status='pending'`) — double-click / race: hanya satu yang menang.
+- Fail-closed: kedaluwarsa, restart (pending → `expired` saat startup), error → **tolak**; tidak ada eksekusi ulang otomatis.
+- Argumen ditampilkan setelah sanitasi secret (`tools.PreviewArgs`).
+
+## Scheduler
+
+- `/sched add <nama> interval <detik> <prompt>` (60 s..30 hari) atau `once <RFC3339> <prompt>`.
+- Persisten di SQLite (`schedules`, `schedule_runs`); anti-eksekusi-ganda via CAS `WHERE next_run_at=old`.
+- Kebijakan missed-run eksplisit: interval → 1 eksekusi + `next = now + interval` (tidak mengejar backlog); `once` terlewat > 24 jam → dinonaktifkan, bukan dijalankan.
+- Job berjalan dengan security policy yang sama; job yang butuh approval berhenti menunggu keputusan.
+
+## /clear dan memory
+
+- `/clear` menghapus riwayat pesan **hanya sesi aktif** (transaksional, dengan konfirmasi tombol); memory jangka panjang tidak terhapus.
+- Retensi: `MEMORY_RETENTION_DAYS` dikonfigurasi di `.env` (pembersihan otomatis berkala menyusul; backup terlebih dulu via `deploy/scripts/backup.sh`).
 
 ## Recovery
 
@@ -67,13 +89,12 @@ Tugas berstatus `running`/`waiting_approval` saat restart **tidak diulang otomat
 
 ## Keterbatasan (jujur, belum diimplementasi)
 
-1. **Approval interaktif belum aktif** — tool berisiko selalu ditolak di mode default; alur persetujuan via chat (/approve) belum dibangun.
-2. **Scheduler/background tasks belum ada** (tahap 8 master plan).
-3. Memory search = LIKE SQL, **bukan semantic search**.
-4. `/clear` placeholder; retensi memory (`MEMORY_RETENTION_DAYS`) belum dieksekusi otomatis.
-5. Orkestrasi multi-langkah masih lewat agent loop tunggal, tanpa planner eksplisit.
-6. Pengukuran RAM/CPU pada target 4 GB **belum dilakukan** (dibangun & diuji di VM x86_64 2 vCPU; binary statis CGO-free, diharapkan < 50 MB RSS saat idle — angka aktual harus diukur di VM42).
-7. Tes Telegram end-to-end butuh token bot asli — belum dijalankan.
+1. **E2E Telegram dengan bot sungguhan belum dijalankan** — butuh token asli; semua logika lokal teruji via unit/integration test (mock provider + SQLite).
+2. Memory search = LIKE SQL, **bukan semantic search**.
+3. Retensi memory (`MEMORY_RETENTION_DAYS`) berupa config, belum dieksekusi otomatis oleh pekerja berkala.
+4. Zona waktu jadwal disimpan per-jadwal (default `Asia/Jakarta`) tapi perhitungan interval memakai UTC; cron ekspresi (mis. "tiap Senin 09:00") belum didukung — hanya `once` RFC3339 dan `interval`.
+5. Pengukuran RAM/CPU pada target 4 GB **belum dilakukan** (dibangun & diuji di VM x86_64 2 vCPU; RSS idle terukur ~18 MB di VM pengembangan — bukan angka VM42).
+6. Approval binding: `args_hash` disimpan tapi belum diverifikasi ulang saat eksekusi (eksekusi tetap memakai argumen asli dari loop, sehingga risiko low; verifikasi eksplisit menyusul).
 
 ## Verifikasi
 

@@ -36,14 +36,16 @@ type Limits struct {
 type ApprovalFunc func(taskID int64, tool string, args json.RawMessage) bool
 
 type Runner struct {
-	Provider  llm.Provider
-	Registry  *tools.Registry
-	Store     *storage.Store
-	TaskTable *tools.TaskTable
-	Limits    Limits
-	Approve   ApprovalFunc // nil = tool PermApproval otomatis ditolak
-	Skills    []*skills.Skill
-	Log       *slog.Logger
+	Provider    llm.Provider
+	Registry    *tools.Registry
+	Store       *storage.Store
+	TaskTable   *tools.TaskTable
+	Limits      Limits
+	Approve     ApprovalFunc // approval sinkron lama (test); prioritas lebih rendah dari Bridge
+	Bridge      *ApprovalBridge
+	ApprovalTTL time.Duration
+	Skills      []*skills.Skill
+	Log         *slog.Logger
 }
 
 // Run menjalankan satu tugas. Mengembalikan hasil akhir dan status final.
@@ -155,9 +157,17 @@ func (r *Runner) Run(ctx context.Context, taskID int64, sessionID, userMsg strin
 			args := json.RawMessage(tc.Function.Arguments)
 			approved := false
 			if t, ok := r.Registry.Get(tc.Function.Name); ok && t.Permission() == tools.PermApproval {
-				if r.Approve != nil && r.Approve(taskID, tc.Function.Name, args) {
-					approved = true
-				} else {
+				switch {
+				case r.Bridge != nil:
+					ttl := r.ApprovalTTL
+					if ttl <= 0 {
+						ttl = 5 * time.Minute
+					}
+					approved, _ = r.Bridge.WaitForApproval(rctx, taskID, tc.Function.Name, args, ttl)
+				case r.Approve != nil:
+					approved = r.Approve(taskID, tc.Function.Name, args)
+				}
+				if !approved {
 					out := fmt.Sprintf(`{"error":"ditolak: tool %s memerlukan persetujuan pengguna"}`, tc.Function.Name)
 					r.Store.AppendMessage(sessionID, "tool", out, "", tc.ID)
 					messages = append(messages, llm.Message{Role: "tool", Content: out, ToolCallID: tc.ID})
