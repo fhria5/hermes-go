@@ -17,7 +17,7 @@ cp -rn "$(dirname "$0")/.."/skills/* "$INSTALL_DIR/skills/" 2>/dev/null || true 
 
 # .env: buat jika belum ada, jangan pernah ditimpa
 if [[ ! -f "$INSTALL_DIR/.env" ]]; then
-  install -m 0600 "$(dirname "$0")/.."/.env.example "$INSTALL_DIR/.env"
+  install -m 0600 "$(dirname "$0")/../.."/.env.example "$INSTALL_DIR/.env"
   echo ">> Isi LLM_API_KEY, TELEGRAM_BOT_TOKEN, dan TELEGRAM_ALLOWED_USERS di $INSTALL_DIR/.env"
 fi
 
