@@ -3,17 +3,17 @@
 set -euo pipefail
 
 INSTALL_DIR=/opt/hermes-go
-BIN_SRC="$(cd "$(dirname "$0")/.." && pwd)/hermes-go"  # hasil go build
+BIN_SRC="$(cd "$(dirname "$0")/../.." && pwd)/deploy/hermes-go"  # hasil go build
 
 if [[ $EUID -ne 0 ]]; then echo "Jalankan sebagai root" >&2; exit 1; fi
-if [[ ! -x "$BIN_SRC" ]]; then echo "Binary $BIN_SRC tidak ditemukan. Build dulu: cd repo && go build -o hermes-go ./cmd/agent" >&2; exit 1; fi
+if [[ ! -x "$BIN_SRC" ]]; then echo "Binary $BIN_SRC tidak ditemukan. Build dulu: go build -o deploy/hermes-go ./cmd/agent" >&2; exit 1; fi
 
 # User service non-root
 id -u hermes &>/dev/null || useradd --system --home "$INSTALL_DIR" --shell /usr/sbin/nologin hermes
 
 mkdir -p "$INSTALL_DIR"/{data,workspace,skills}
 install -m 0755 "$BIN_SRC" "$INSTALL_DIR/hermes-go"
-cp -rn "$(dirname "$0")/.."/skills/* "$INSTALL_DIR/skills/" 2>/dev/null || true  # -n: jangan timpa skill yang sudah ada/dimodifikasi
+cp -rn "$(dirname "$0")/../.."/skills/* "$INSTALL_DIR/skills/" 2>/dev/null || true  # -n: jangan timpa skill yang sudah ada/dimodifikasi
 
 # .env: buat jika belum ada, jangan pernah ditimpa
 if [[ ! -f "$INSTALL_DIR/.env" ]]; then
@@ -24,7 +24,7 @@ fi
 chown -R hermes:hermes "$INSTALL_DIR"
 chmod 700 "$INSTALL_DIR/data" "$INSTALL_DIR/workspace"
 
-install -m 0644 "$(dirname "$0")/systemd/hermes-go.service" /etc/systemd/system/hermes-go.service
+install -m 0644 "$(dirname "$0")/../systemd/hermes-go.service" /etc/systemd/system/hermes-go.service
 systemctl daemon-reload
 echo ">> Selesai. Isi .env lalu: systemctl enable --now hermes-go"
 echo ">> Status: systemctl status hermes-go | Log: journalctl -u hermes-go -f"
