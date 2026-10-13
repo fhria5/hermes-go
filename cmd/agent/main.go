@@ -141,8 +141,7 @@ func main() {
 	defer stop()
 
 	api := telegram.NewAPI(cfg.Telegram.BotToken, log)
-	var allowed []int64
-	_ = json.Unmarshal([]byte(os.Getenv("TELEGRAM_ALLOWED_USERS")), &allowed)
+	allowed := parseAllowedUsers(os.Getenv("TELEGRAM_ALLOWED_USERS"))
 	bot := telegram.NewBot(api, allowed, 10, log)
 	chats := newApprovalChats()
 
@@ -465,4 +464,20 @@ func (a *storeAdapter) SetTaskStatus(id int64, s string) error { return a.store.
 func HashArgs(args json.RawMessage) string {
 	h := sha256.Sum256(args)
 	return hex.EncodeToString(h[:])
+}
+
+// parseAllowedUsers: terima format JSON array ([1,2]) ATAU daftar dipisah koma ("1,2").
+// Bug lama: hanya JSON — nilai polos "7804936884" membuat semua user ditolak.
+func parseAllowedUsers(raw string) []int64 {
+	var allowed []int64
+	if strings.HasPrefix(raw, "[") {
+		_ = json.Unmarshal([]byte(raw), &allowed)
+		return allowed
+	}
+	for _, part := range strings.Split(raw, ",") {
+		if id, err := strconv.ParseInt(strings.TrimSpace(part), 10, 64); err == nil && id != 0 {
+			allowed = append(allowed, id)
+		}
+	}
+	return allowed
 }
