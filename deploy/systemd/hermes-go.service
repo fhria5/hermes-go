@@ -1,0 +1,28 @@
+[Unit]
+Description=Hermes-Go AI Agent (Telegram)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hermes
+Group=hermes
+WorkingDirectory=/opt/hermes-go
+EnvironmentFile=/opt/hermes-go/.env
+ExecStart=/opt/hermes-go/hermes-go
+Restart=on-failure
+RestartSec=5
+# Hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/hermes-go/data /opt/hermes-go/workspace
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+MemoryMax=1G
+
+[Install]
+WantedBy=multi-user.target

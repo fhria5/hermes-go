@@ -1,0 +1,7 @@
+.env
+data/
+workspace/
+hermes-go
+*.db
+*.db-wal
+*.db-shm
