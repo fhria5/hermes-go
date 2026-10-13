@@ -35,9 +35,12 @@ echo ">> Versi: $VERSION"
 # --- unduh binary + installer sesuai arsitektur ---
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
-URL="https://github.com/$REPO/releases/download/$VERSION/hermes-go-linux-$ARCH.tar.gz"
-echo ">> Unduh: $URL"
-curl -fsSL "${AUTH[@]}" "$URL" | $SUDO tar xz -C "$TMP"
+# Repo private: unduh asset via API (Accept: octet-stream)
+ASSET_ID=$(curl -fsSL "${AUTH[@]}" "https://api.github.com/repos/$REPO/releases/tags/$VERSION" \
+  | python3 -c "import json,sys; r=json.load(sys.stdin); print(next(a['id'] for a in r['assets'] if a['name']=='hermes-go-linux-$ARCH.tar.gz'))")
+echo ">> Unduh hermes-go-linux-$ARCH.tar.gz (asset $ASSET_ID)"
+curl -fsSL "${AUTH[@]}" -H "Accept: application/octet-stream" \
+  "https://api.github.com/repos/$REPO/releases/assets/$ASSET_ID" | $SUDO tar xz -C "$TMP"
 
 # --- jalankan installer lokal (buat user, /opt, systemd unit, .env jika belum ada) ---
 $SUDO bash "$TMP/deploy/scripts/install.sh"
