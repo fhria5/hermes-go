@@ -24,8 +24,10 @@ esac
 echo ">> Arsitektur: $ARCH"
 
 # --- pilih versi release ---
+AUTH=()
+if [[ -n "${GITHUB_TOKEN:-}" ]]; then AUTH=(-H "Authorization: token $GITHUB_TOKEN"); fi
 if [[ "$VERSION" == "latest" ]]; then
-  VERSION=$($SUDO curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | grep -oP '"tag_name":\s*"\K[^"]+') \
+  VERSION=$(curl -fsSL "${AUTH[@]}" "https://api.github.com/repos/$REPO/releases/latest" | grep -oP '"tag_name":\s*"\K[^"]+') \
     || { echo "Gagal ambil versi terbaru (repo private? set GITHUB_TOKEN=... dulu)" >&2; exit 1; }
 fi
 echo ">> Versi: $VERSION"
@@ -35,7 +37,7 @@ TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 URL="https://github.com/$REPO/releases/download/$VERSION/hermes-go-linux-$ARCH.tar.gz"
 echo ">> Unduh: $URL"
-$SUDO curl -fsSL "$URL" | $SUDO tar xz -C "$TMP"
+curl -fsSL "${AUTH[@]}" "$URL" | $SUDO tar xz -C "$TMP"
 
 # --- jalankan installer lokal (buat user, /opt, systemd unit, .env jika belum ada) ---
 $SUDO bash "$TMP/deploy/scripts/install.sh"
