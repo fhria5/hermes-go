@@ -105,6 +105,7 @@ func main() {
 	reg.Register(&tools.TaskStatusTool{Store: memAdapter, Tasks: taskTable})
 	reg.Register(&tools.TaskCancelTool{Tasks: taskTable})
 	reg.Register(&tools.SystemInfoTool{Services: []string{"hermes-go"}})
+	reg.Register(&tools.SkillManageTool{SkillsDir: cfg.Agent.SkillsDir, MaxSkillChars: 100000})
 
 	provider := &llm.OpenAICompat{
 		BaseURL: cfg.LLM.BaseURL, APIKey: cfg.LLM.APIKey, ModelName: cfg.LLM.Model,

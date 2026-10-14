@@ -79,6 +79,14 @@ func (r *Runner) Run(ctx context.Context, taskID int64, sessionID, userMsg strin
 			memCtx += "- " + strings.ReplaceAll(m.Content, "\n", " ") + "\n"
 		}
 	}
+	// Level 0 progressive disclosure: daftar SEMUA skill (nama+deskripsi) selalu
+	// terlihat; isi lengkap dimuat hanya saat relevan (di atas).
+	if len(r.Skills) > 0 {
+		memCtx += "\n## Skill tersedia (sebut namanya untuk memakai; perbarui lewat tool skill_manage):\n"
+		for _, s := range r.Skills {
+			memCtx += "- " + s.Name + ": " + s.Description + "\n"
+		}
+	}
 	sysMsg := llm.Message{Role: "system", Content: systemPrompt + memCtx + skillCtx}
 	_ = r.Store.AppendMessage(sessionID, "user", userMsg, "", "")
 	history, _ := r.Store.History(sessionID, 40)
