@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -383,6 +384,35 @@ func (a *API) SendLong(ctx context.Context, chatID int64, text string) error {
 			return err
 		}
 		text = text[len(part):]
+	}
+	return nil
+}
+
+// SendDocument: kirim file sebagai dokumen Telegram (multipart).
+func (a *API) SendDocument(ctx context.Context, chatID int64, filename string, content []byte) error {
+	var buf strings.Builder
+	w := multipart.NewWriter(&buf)
+	fw, _ := w.CreateFormFile("document", filename)
+	fw.Write(content)
+	_ = w.WriteField("chat_id", strconv.FormatInt(chatID, 10))
+	w.Close()
+	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("https://api.telegram.org/bot%s/sendDocument", a.token), strings.NewReader(buf.String()))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", w.FormDataContentType())
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	var out struct {
+		OK          bool   `json:"ok"`
+		Description string `json:"description"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&out)
+	if !out.OK {
+		return fmt.Errorf("telegram api error: %s", out.Description)
 	}
 	return nil
 }

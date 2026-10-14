@@ -93,6 +93,11 @@ func main() {
 	reg.Register(&tools.WriteFileTool{Cfg: fsCfg})
 	reg.Register(&tools.ShellTool{Allowlist: cfg.Agent.ShellAllowlist, MaxOutput: int(cfg.Agent.MaxOutputBytes), Timeout: cfg.Agent.ToolTimeout})
 	reg.Register(&tools.HTTPTool{Client: tools.NewSSRFSafeClient(cfg.Security.AllowedHosts, cfg.Security.DenyPrivateNet, cfg.Security.HTTPTimeout), MaxResp: cfg.Security.MaxHTTPRespBytes})
+	// Tahap C: web tools — client SSRF-guarded, tapi allowlist JANGAN dipakai untuk web umum;
+	// gunakan client terbatas: denyPrivate + timeout, tanpa allowlist host (tujuan: internet publik).
+	webClient := tools.NewSSRFSafeClient(nil, cfg.Security.DenyPrivateNet, cfg.Security.HTTPTimeout)
+	reg.Register(&tools.WebSearchTool{Client: webClient, MaxResp: cfg.Security.MaxHTTPRespBytes})
+	reg.Register(&tools.WebFetchTool{Client: webClient, MaxResp: cfg.Security.MaxHTTPRespBytes})
 	memAdapter := &storeAdapter{store: store}
 	reg.Register(&tools.SearchMemoryTool{Store: memAdapter})
 	reg.Register(&tools.SaveMemoryTool{Store: memAdapter})
@@ -268,6 +273,7 @@ func main() {
 				"/memory <query> — cari memory\n" +
 				"/clear — hapus riwayat sesi ini\n" +
 				"/sched — tugas terjadwal\n" +
+				"/export — unduh riwayat percakapan\n" +
 				"/tools — daftar tools"
 			_ = api.SendMessage(ctx, chatID, msg)
 		case text == "/tasks":
@@ -305,6 +311,28 @@ func main() {
 			_ = api.SendMessage(ctx, chatID, fmt.Sprintf("#%d [%s]", tasks[0].ID, tasks[0].Status))
 		case strings.HasPrefix(text, "/sched"):
 			handleSched(ctx, api, store, sessionID, chatID, text)
+		case text == "/tools":
+			var tlist strings.Builder
+			tlist.WriteString("Tools tersedia:\n")
+			for _, t := range reg.AllowedTools() {
+				tlist.WriteString("• " + t.Function.Name + "\n")
+			}
+			_ = api.SendMessage(ctx, chatID, tlist.String())
+		case text == "/export":
+			hist, err := store.History(sessionID, 500)
+			if err != nil || len(hist) == 0 {
+				_ = api.SendMessage(ctx, chatID, "Riwayat kosong.")
+			} else {
+				var sb strings.Builder
+				sb.WriteString("# Riwayat percakapan Hermes-Go\n\n")
+				for _, m := range hist {
+					sb.WriteString(fmt.Sprintf("**%s**: %s\n\n", m.Role, m.Content))
+				}
+				fname := fmt.Sprintf("hermes-export-%s.txt", time.Now().Format("20060102-150405"))
+				if err := api.SendDocument(ctx, chatID, fname, []byte(sb.String())); err != nil {
+					_ = api.SendMessage(ctx, chatID, "Gagal kirim file: "+err.Error())
+				}
+			}
 		case text == "/clear":
 			if _, err := api.SendMessageWithButtons(ctx, chatID,
 				"Hapus seluruh riwayat pesan sesi ini? Memory jangka panjang TIDAK terhapus.",
