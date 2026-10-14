@@ -104,6 +104,7 @@ func main() {
 	taskTable := tools.NewTaskTable()
 	reg.Register(&tools.TaskStatusTool{Store: memAdapter, Tasks: taskTable})
 	reg.Register(&tools.TaskCancelTool{Tasks: taskTable})
+	reg.Register(&tools.SystemInfoTool{Services: []string{"hermes-go"}})
 
 	provider := &llm.OpenAICompat{
 		BaseURL: cfg.LLM.BaseURL, APIKey: cfg.LLM.APIKey, ModelName: cfg.LLM.Model,
@@ -274,6 +275,7 @@ func main() {
 				"/clear — hapus riwayat sesi ini\n" +
 				"/sched — tugas terjadwal\n" +
 				"/export — unduh riwayat percakapan\n" +
+				"/sysinfo — kondisi mesin (RAM, disk, CPU, suhu)\n" +
 				"/tools — daftar tools"
 			_ = api.SendMessage(ctx, chatID, msg)
 		case text == "/tasks":
@@ -332,6 +334,13 @@ func main() {
 				if err := api.SendDocument(ctx, chatID, fname, []byte(sb.String())); err != nil {
 					_ = api.SendMessage(ctx, chatID, "Gagal kirim file: "+err.Error())
 				}
+			}
+		case text == "/sysinfo":
+			res, err := reg.RunWithPolicy(ctx, "system_info", nil, false, 10*time.Second, 4096)
+			if err != nil {
+				_ = api.SendMessage(ctx, chatID, "Gagal: "+err.Error())
+			} else {
+				_ = api.SendMessage(ctx, chatID, res.Output)
 			}
 		case text == "/clear":
 			if _, err := api.SendMessageWithButtons(ctx, chatID,
