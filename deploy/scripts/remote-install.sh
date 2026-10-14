@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Hermes-Go — one-liner installer.
 # Pemakaian:  curl -fsSL https://raw.githubusercontent.com/fhria5/hermes-go/main/deploy/scripts/remote-install.sh | bash
-# Atau:       bash remote-install.sh [versi]   (default: latest release)
+# Atau:       bash remote-install.sh [versi]
 set -euo pipefail
 
 REPO="fhria5/hermes-go"
@@ -24,23 +24,18 @@ esac
 echo ">> Arsitektur: $ARCH"
 
 # --- pilih versi release ---
-AUTH=()
-if [[ -n "${GITHUB_TOKEN:-}" ]]; then AUTH=(-H "Authorization: token $GITHUB_TOKEN"); fi
 if [[ "$VERSION" == "latest" ]]; then
-  VERSION=$(curl -fsSL "${AUTH[@]}" "https://api.github.com/repos/$REPO/releases/latest" | grep -oP '"tag_name":\s*"\K[^"]+') \
-    || { echo "Gagal ambil versi terbaru (repo private? set GITHUB_TOKEN=... dulu)" >&2; exit 1; }
+  VERSION=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | grep -oP '"tag_name":\s*"\K[^"]+') \
+    || { echo "Gagal ambil versi terbaru" >&2; exit 1; }
 fi
 echo ">> Versi: $VERSION"
 
-# --- unduh binary + installer sesuai arsitektur ---
+# --- unduh binary + installer sesuai arsitektur (repo public, tanpa auth) ---
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
-# Repo private: unduh asset via API (Accept: octet-stream)
-ASSET_ID=$(curl -fsSL "${AUTH[@]}" "https://api.github.com/repos/$REPO/releases/tags/$VERSION" \
-  | python3 -c "import json,sys; r=json.load(sys.stdin); print(next(a['id'] for a in r['assets'] if a['name']=='hermes-go-linux-$ARCH.tar.gz'))")
-echo ">> Unduh hermes-go-linux-$ARCH.tar.gz (asset $ASSET_ID)"
-curl -fsSL "${AUTH[@]}" -H "Accept: application/octet-stream" \
-  "https://api.github.com/repos/$REPO/releases/assets/$ASSET_ID" | $SUDO tar xz -C "$TMP"
+URL="https://github.com/$REPO/releases/download/$VERSION/hermes-go-linux-$ARCH.tar.gz"
+echo ">> Unduh: $URL"
+curl -fsSL "$URL" | $SUDO tar xz -C "$TMP"
 
 # --- jalankan installer lokal (buat user, /opt, systemd unit, .env jika belum ada) ---
 $SUDO bash "$TMP/deploy/scripts/install.sh"
