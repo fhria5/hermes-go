@@ -26,7 +26,11 @@ echo ">> Arsitektur: $ARCH"
 # --- pilih versi release ---
 if [[ "$VERSION" == "latest" ]]; then
   VERSION=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | grep -oP '"tag_name":\s*"\K[^"]+') \
-    || { echo "Gagal ambil versi terbaru" >&2; exit 1; }
+    || VERSION=""
+  if [[ -z "$VERSION" ]]; then
+    echo ">> API GitHub tidak terjangkau (rate limit?), fallback ke v0.2.2" >&2
+    VERSION="v0.2.2"
+  fi
 fi
 echo ">> Versi: $VERSION"
 
