@@ -156,8 +156,10 @@ func main() {
 	go bridge.Consume(ctx, func(req *agent.ApprovalRequest) {
 		chatID := chats.get(req.TaskID)
 		if chatID == 0 {
+			log.Warn("approval: chat tujuan tidak dikenal — tolak", "task_id", req.TaskID, "tool", req.Tool)
 			return // tidak tahu tujuan → TTL menolak (fail-closed)
 		}
+		log.Info("approval: permintaan dikirim ke user", "task_id", req.TaskID, "tool", req.Tool, "approval_id", req.ID)
 		ap := &storage.Approval{
 			ID: req.ID, TaskID: req.TaskID, SessionID: fmt.Sprintf("tg:%d", chatID),
 			Tool: req.Tool, ArgsPreview: tools.PreviewArgs(req.Args, 300),
