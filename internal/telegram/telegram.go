@@ -177,12 +177,12 @@ type Bot struct {
 	CallbackFn   func(ctx context.Context, userID int64, data, cbID string)
 	log          *slog.Logger
 
-	seen     map[int64]bool
-	seenMu   sync.Mutex
-	queue    chan Update
-	cbQueue  chan *CallbackQuery
-	userMute map[int64]time.Time // rate limit sederhana per user
-	muteMu   sync.Mutex
+	seen      map[int64]bool
+	seenMu    sync.Mutex
+	queue     chan Update
+	cbQueue   chan *CallbackQuery
+	userTimes map[int64][]time.Time // rate limit burst 5/menit per user
+	muteMu    sync.Mutex
 }
 
 func NewBot(api *API, allowed []int64, queueSize int, log *slog.Logger) *Bot {
@@ -192,10 +192,10 @@ func NewBot(api *API, allowed []int64, queueSize int, log *slog.Logger) *Bot {
 	}
 	return &Bot{
 		API: api, AllowedUsers: am, log: log,
-		seen:     map[int64]bool{},
-		queue:    make(chan Update, queueSize),
-		cbQueue:  make(chan *CallbackQuery, queueSize),
-		userMute: map[int64]time.Time{},
+		seen:      map[int64]bool{},
+		queue:     make(chan Update, queueSize),
+		cbQueue:   make(chan *CallbackQuery, queueSize),
+		userTimes: map[int64][]time.Time{},
 	}
 }
 
@@ -329,12 +329,23 @@ func (b *Bot) markSeen(id int64) bool {
 	return false
 }
 
+// Rate limit per user: burst 5 pesan per menit (rolling).
+// Sebelumnya 1 pesan/menit — terlalu ketat untuk pemakaian normal.
 func (b *Bot) muted(uid int64) bool {
 	b.muteMu.Lock()
 	defer b.muteMu.Unlock()
-	if t, ok := b.userMute[uid]; ok && time.Since(t) < time.Minute {
+	now := time.Now()
+	// buang timestamps lebih lama dari 1 menit
+	var keep []time.Time
+	for _, t := range b.userTimes[uid] {
+		if now.Sub(t) < time.Minute {
+			keep = append(keep, t)
+		}
+	}
+	if len(keep) >= 5 {
+		b.userTimes[uid] = keep
 		return true
 	}
-	b.userMute[uid] = time.Now()
+	b.userTimes[uid] = append(keep, now)
 	return false
 }
