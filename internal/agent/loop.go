@@ -49,6 +49,8 @@ type Runner struct {
 	// OnToolStart dipanggil sebelum tiap tool dieksekusi (status "⏳ menjalankan...").
 	// TIDAK boleh blocking lama; error diabaikan.
 	OnToolStart func(taskID int64, tool string, args string)
+	// OnPhase dipanggil pada perubahan fase tugas: "thinking", "done", "failed".
+	OnPhase func(taskID int64, phase string)
 }
 
 // Run menjalankan satu tugas. Mengembalikan hasil akhir dan status final.
@@ -124,6 +126,9 @@ func (r *Runner) Run(ctx context.Context, taskID int64, sessionID, userMsg strin
 			return "Anggaran token tugas terlampaui.", "failed"
 		}
 
+		if r.OnPhase != nil {
+			r.OnPhase(taskID, "thinking")
+		}
 		resp, err := r.Provider.Chat(rctx, llm.ChatRequest{
 			Model:       r.Provider.Model(),
 			Messages:    messages,
@@ -133,6 +138,9 @@ func (r *Runner) Run(ctx context.Context, taskID int64, sessionID, userMsg strin
 		})
 		if err != nil {
 			r.Store.SetTaskStatus(taskID, "failed")
+			if r.OnPhase != nil {
+				r.OnPhase(taskID, "failed")
+			}
 			return fmt.Sprintf("LLM error: %v", err), "failed"
 		}
 		tokensUsed += resp.Usage.TotalTokens
@@ -142,6 +150,9 @@ func (r *Runner) Run(ctx context.Context, taskID int64, sessionID, userMsg strin
 			content, _ := choice.Content.(string)
 			r.Store.AppendMessage(sessionID, "assistant", content, "", "")
 			r.Store.SetTaskStatus(taskID, "succeeded")
+			if r.OnPhase != nil {
+				r.OnPhase(taskID, "done")
+			}
 			return content, "succeeded"
 		}
 

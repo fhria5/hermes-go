@@ -416,3 +416,50 @@ func (a *API) SendDocument(ctx context.Context, chatID int64, filename string, c
 	}
 	return nil
 }
+
+// callMsgID: call yang mem-parse result[].message_id (untuk editMessageText nanti).
+func (a *API) callMsgID(ctx context.Context, method string, params url.Values) (int64, error) {
+	u := fmt.Sprintf("https://api.telegram.org/bot%s/%s", a.token, method)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, strings.NewReader(params.Encode()))
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	var r struct {
+		OK          bool   `json:"ok"`
+		Description string `json:"description"`
+		Result      struct {
+			MessageID int64 `json:"message_id"`
+		} `json:"result"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
+		return 0, err
+	}
+	if !r.OK {
+		return 0, fmt.Errorf("telegram api error: %s", r.Description)
+	}
+	return r.Result.MessageID, nil
+}
+
+// SendMessageID: kirim pesan, balikan message_id untuk diedit belakangan.
+func (a *API) SendMessageID(ctx context.Context, chatID int64, text string) (int64, error) {
+	return a.callMsgID(ctx, "sendMessage", url.Values{
+		"chat_id": {strconv.FormatInt(chatID, 10)},
+		"text":    {truncateMsg(text)},
+	})
+}
+
+// EditMessageText: perbarui isi pesan (status live).
+func (a *API) EditMessageText(ctx context.Context, chatID, messageID int64, text string) error {
+	_, err := a.callMsgID(ctx, "editMessageText", url.Values{
+		"chat_id":    {strconv.FormatInt(chatID, 10)},
+		"message_id": {strconv.FormatInt(messageID, 10)},
+		"text":       {truncateMsg(text)},
+	})
+	return err
+}

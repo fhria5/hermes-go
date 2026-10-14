@@ -188,10 +188,91 @@ func main() {
 		}
 	})
 
-	// Status "⏳ menjalankan tool" per tugas (Tahap B: streaming status ringan).
+	// Status live per tugas: SATU pesan Telegram yang di-edit berkala
+	// (mulai → berpikir → daftar tool → selesai). Throttle 2 detik agar
+	// tidak kena rate limit Telegram.
+	statusMsgs := struct {
+		sync.Mutex
+		m map[int64][2]int64 // taskID → [chatID, messageID]
+	}{m: map[int64][2]int64{}}
+	lastEdit := struct {
+		sync.Mutex
+		m map[int64]time.Time
+	}{m: map[int64]time.Time{}}
+	throttled := func(taskID int64) bool {
+		lastEdit.Lock()
+		defer lastEdit.Unlock()
+		if time.Since(lastEdit.m[taskID]) < 2*time.Second {
+			return true
+		}
+		lastEdit.m[taskID] = time.Now()
+		return false
+	}
+	statusTools := struct {
+		sync.Mutex
+		m map[int64][]string
+	}{m: map[int64][]string{}}
+	editStatus := func(taskID int64, tail string) {
+		final := tail == "✅ selesai" || tail == "❌ gagal"
+		if !final && throttled(taskID) {
+			return
+		}
+		statusMsgs.Lock()
+		cm, ok := statusMsgs.m[taskID]
+		statusMsgs.Unlock()
+		if !ok {
+			return
+		}
+		statusTools.Lock()
+		tl := append([]string(nil), statusTools.m[taskID]...)
+		statusTools.Unlock()
+		lines := ""
+		for _, t := range tl {
+			lines += "• " + t + "\n"
+		}
+		if lines == "" {
+			lines = "• (memulai)\n"
+		}
+		_ = api.EditMessageText(ctx, cm[0], cm[1],
+			fmt.Sprintf("🔧 Tugas #%d\n%s\n%s", taskID, lines, tail))
+	}
+	// Kirim pesan status awal saat tugas dibuat (dipanggil dari handler & scheduler).
+	sendStatus := func(taskID, chatID int64) {
+		mid, err := api.SendMessageID(ctx, chatID, fmt.Sprintf("🔧 Tugas #%d dimulai...", taskID))
+		if err != nil {
+			return
+		}
+		statusMsgs.Lock()
+		statusMsgs.m[taskID] = [2]int64{chatID, mid}
+		statusMsgs.Unlock()
+	}
 	runner.OnToolStart = func(taskID int64, tool string, args string) {
-		if cid := chats.get(taskID); cid != 0 {
-			_ = api.SendLong(ctx, cid, fmt.Sprintf("⏳ #%d menjalankan %s", taskID, tool))
+		statusTools.Lock()
+		tl := statusTools.m[taskID]
+		if len(tl) == 0 || tl[len(tl)-1] != tool {
+			tl = append(tl, tool)
+		}
+		if len(tl) > 8 {
+			tl = tl[len(tl)-8:]
+		}
+		statusTools.m[taskID] = tl
+		statusTools.Unlock()
+		editStatus(taskID, "⏳ sedang mengerjakan...")
+	}
+	runner.OnPhase = func(taskID int64, phase string) {
+		switch phase {
+		case "thinking":
+			editStatus(taskID, "🧠 berpikir...")
+		case "done":
+			editStatus(taskID, "✅ selesai")
+			statusTools.Lock()
+			delete(statusTools.m, taskID)
+			statusTools.Unlock()
+		case "failed":
+			editStatus(taskID, "❌ gagal")
+			statusTools.Lock()
+			delete(statusTools.m, taskID)
+			statusTools.Unlock()
 		}
 	}
 
@@ -253,6 +334,7 @@ func main() {
 			return
 		}
 		chats.set(taskID, chatID)
+		sendStatus(taskID, chatID)
 		_ = api.SendMessage(ctx, chatID, fmt.Sprintf("⏰ Tugas terjadwal #%d dimulai.", taskID))
 		go func() {
 			result, status := runner.Run(ctx, taskID, sessionID, prompt)
@@ -365,6 +447,7 @@ func main() {
 				return
 			}
 			chats.set(taskID, chatID)
+			sendStatus(taskID, chatID)
 			_ = api.SendMessage(ctx, chatID, fmt.Sprintf("Tugas #%d diterima, sedang dikerjakan.", taskID))
 			start := time.Now()
 			result, status := runner.Run(ctx, taskID, sessionID, text)
