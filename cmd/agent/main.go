@@ -241,7 +241,7 @@ func main() {
 		go func() {
 			result, status := runner.Run(ctx, taskID, sessionID, prompt)
 			log.Info("tugas terjadwal selesai", "task_id", taskID, "status", status)
-			_ = api.SendMessage(ctx, chatID, fmt.Sprintf("Tugas terjadwal #%d [%s]\n%s", taskID, status, result))
+			_ = api.SendLong(ctx, chatID, fmt.Sprintf("Tugas terjadwal #%d [%s]\n\n%s", taskID, status, result))
 		}()
 	})
 	go sched.Run(ctx)
@@ -253,9 +253,15 @@ func main() {
 		sessionID := fmt.Sprintf("tg:%d", userID)
 		switch {
 		case text == "/start", text == "/help":
-			msg := "Hermes-Go agent. Kirim tugas sebagai pesan biasa.\n" +
-				"/status — status tugas terakhir\n/tasks — daftar tugas\n" +
-				"/cancel <id> — batalkan tugas\n/memory <query> — cari memory\n/clear — (belum diimplementasi)"
+			msg := "🤖 Hermes-Go — AI agent dengan tools.\n" +
+				"Kirim tugas sebagai pesan biasa. Konteks percakapan diingat.\n\n" +
+				"/status — status tugas terakhir\n" +
+				"/tasks — 10 tugas terakhir\n" +
+				"/cancel <id> — batalkan tugas berjalan\n" +
+				"/memory <query> — cari memory\n" +
+				"/clear — hapus riwayat sesi ini\n" +
+				"/sched — tugas terjadwal\n" +
+				"/tools — daftar tools"
 			_ = api.SendMessage(ctx, chatID, msg)
 		case text == "/tasks":
 			tasks, _ := store.ListTasks(sessionID, 10)
@@ -316,7 +322,7 @@ func main() {
 			start := time.Now()
 			result, status := runner.Run(ctx, taskID, sessionID, text)
 			log.Info("tugas selesai", "task_id", taskID, "status", status, "durasi", time.Since(start).String())
-			_ = api.SendMessage(ctx, chatID, fmt.Sprintf("Tugas #%d [%s]\n\n%s", taskID, status, result))
+			_ = api.SendLong(ctx, chatID, fmt.Sprintf("Tugas #%d [%s]\n\n%s", taskID, status, result))
 		}
 	}
 

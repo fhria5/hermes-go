@@ -362,3 +362,27 @@ func (b *Bot) muted(uid int64) bool {
 	b.userTimes[uid] = append(keep, now)
 	return false
 }
+
+// SendLong: kirim pesan panjang dengan memecah menjadi beberapa pesan (UTF-8 safe).
+// Batas Telegram 4096 char; kita pakai 3900 untuk aman.
+func (a *API) SendLong(ctx context.Context, chatID int64, text string) error {
+	const chunk = 3900
+	for len(text) > 0 {
+		part := text
+		if len(part) > chunk {
+			part = part[:chunk]
+			for len(part) > 0 && !utf8.ValidString(part) {
+				part = part[:len(part)-1]
+			}
+			// coba pecah di baris baru terakhir biar rapi
+			if i := strings.LastIndex(part, "\n"); i > chunk/2 {
+				part = part[:i+1]
+			}
+		}
+		if err := a.SendMessage(ctx, chatID, part); err != nil {
+			return err
+		}
+		text = text[len(part):]
+	}
+	return nil
+}
