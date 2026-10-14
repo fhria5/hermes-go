@@ -179,6 +179,13 @@ func main() {
 		}
 	})
 
+	// Status "⏳ menjalankan tool" per tugas (Tahap B: streaming status ringan).
+	runner.OnToolStart = func(taskID int64, tool string, args string) {
+		if cid := chats.get(taskID); cid != 0 {
+			_ = api.SendLong(ctx, cid, fmt.Sprintf("⏳ #%d menjalankan %s", taskID, tool))
+		}
+	}
+
 	// ---- Callback handler: validasi identitas, status, kedaluwarsa, atomik ----
 	bot.CallbackFn = func(ctx context.Context, userID int64, data, cbID string) {
 		switch {

@@ -46,6 +46,9 @@ type Runner struct {
 	ApprovalTTL time.Duration
 	Skills      []*skills.Skill
 	Log         *slog.Logger
+	// OnToolStart dipanggil sebelum tiap tool dieksekusi (status "⏳ menjalankan...").
+	// TIDAK boleh blocking lama; error diabaikan.
+	OnToolStart func(taskID int64, tool string, args string)
 }
 
 // Run menjalankan satu tugas. Mengembalikan hasil akhir dan status final.
@@ -190,6 +193,9 @@ func (r *Runner) Run(ctx context.Context, taskID int64, sessionID, userMsg strin
 				}
 			} else {
 				approved = true // PermAuto
+			}
+			if r.OnToolStart != nil {
+				r.OnToolStart(taskID, tc.Function.Name, string(args))
 			}
 			start := time.Now()
 			res, err := r.Registry.RunWithPolicy(rctx, tc.Function.Name, args, approved, r.Limits.ToolTimeout, r.Limits.MaxOutput)
