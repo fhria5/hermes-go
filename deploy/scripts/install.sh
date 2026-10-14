@@ -24,7 +24,10 @@ fi
 chown -R hermes:hermes "$INSTALL_DIR"
 chmod 700 "$INSTALL_DIR/data" "$INSTALL_DIR/workspace"
 
-install -m 0644 "$(dirname "$0")/../systemd/hermes-go.service" /etc/systemd/system/hermes-go.service
+# Unit systemd: tarball baru = deploy/systemd/, tarball lama = systemd/ (root)
+UNIT_SRC="$(dirname "$0")/../systemd/hermes-go.service"
+[[ -f "$UNIT_SRC" ]] || UNIT_SRC="$(dirname "$0")/../../systemd/hermes-go.service"
+install -m 0644 "$UNIT_SRC" /etc/systemd/system/hermes-go.service
 systemctl daemon-reload
 echo ">> Selesai. Isi .env lalu: systemctl enable --now hermes-go"
 echo ">> Status: systemctl status hermes-go | Log: journalctl -u hermes-go -f"
