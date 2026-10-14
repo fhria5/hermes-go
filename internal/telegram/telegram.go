@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 type API struct {
@@ -108,13 +109,19 @@ func (a *API) call(ctx context.Context, method string, params url.Values) ([]Upd
 // Update diperluas dengan callback_query (lihat struct Update).
 
 // SendMessageWithButtons: kirim pesan dengan inline keyboard.
+// Guard: buttons kosong atau marshal gagal → kirim tanpa reply_markup
+// (Telegram menolak markup rusak dengan 400 "object expected as reply markup").
 func (a *API) SendMessageWithButtons(ctx context.Context, chatID int64, text string, buttons []InlineButton) (int64, error) {
-	kb, _ := json.Marshal([][]InlineButton{buttons})
-	_, err := a.call(ctx, "sendMessage", url.Values{
-		"chat_id":      {strconv.FormatInt(chatID, 10)},
-		"text":         {truncateMsg(text)},
-		"reply_markup": {string(kb)},
-	})
+	vals := url.Values{
+		"chat_id": {strconv.FormatInt(chatID, 10)},
+		"text":    {truncateMsg(text)},
+	}
+	if len(buttons) > 0 {
+		if kb, err := json.Marshal([][]InlineButton{buttons}); err == nil && len(kb) > 2 {
+			vals["reply_markup"] = []string{string(kb)}
+		}
+	}
+	_, err := a.call(ctx, "sendMessage", vals)
 	return 0, err
 }
 
@@ -126,11 +133,17 @@ func (a *API) AnswerCallbackQuery(ctx context.Context, cbID, text string) {
 	})
 }
 
+// truncateMsg: batasi 4000 bytes DAN jangan memotong di tengah rune UTF-8
+// (potongan rusak bisa membuat Telegram menolak pesan).
 func truncateMsg(s string) string {
-	if len(s) > 4000 {
-		return s[:4000]
+	if len(s) <= 4000 {
+		return s
 	}
-	return s
+	cut := s[:4000]
+	for len(cut) > 0 && !utf8.ValidString(cut) {
+		cut = cut[:len(cut)-1]
+	}
+	return cut
 }
 
 func (a *API) SendMessage(ctx context.Context, chatID int64, text string) error {
